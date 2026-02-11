@@ -3,6 +3,7 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 [![Python](https://img.shields.io/badge/Python-3.11%2B-blue.svg)](https://www.python.org/)
 [![RCSB PDB](https://img.shields.io/badge/RCSB-PDB-00557F.svg)](https://www.rcsb.org/)
+[![DOI](https://zenodo.org/badge/DOI/10.5281/zenodo.18613745.svg)](https://doi.org/10.5281/zenodo.18613745)
 
 
 CLI tool to search the PDB, download mmCIF coordinate files, and split structures into standardized receptor/ligand/cofactor/ion/water variants (Asymmetric Unit + Biological Assembly 1), producing a reproducible on-disk dataset with manifest + per-entry metadata.

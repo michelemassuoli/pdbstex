@@ -575,6 +575,11 @@ Released under the MIT License.
 
 ## References
 
+If you use this code, please refer to:
+
+[https://doi.org/10.5281/zenodo.18363985](https://doi.org/10.5281/zenodo.18613745)
+
+
 RCSB APIs used by PDBStEx (documentation entry points):
 
     https://search.rcsb.org/

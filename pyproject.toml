@@ -1,0 +1,22 @@
+[build-system]
+requires = ["setuptools>=68.0.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "pdbstex"
+version = "0.1.0"
+description = "PDBStEx: RCSB PDB search, download, and structure splitting utility"
+readme = "README.md"
+requires-python = ">=3.11"
+license = {text = "MIT"}
+authors = [{name = "Michele Massuoli"}]
+dependencies = ["requests>=2.31.0", "gemmi>=0.6.7"]
+
+[project.scripts]
+pdbstex = "pdbstex.cli:main"
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+
+[tool.setuptools.packages.find]
+where = ["src"]

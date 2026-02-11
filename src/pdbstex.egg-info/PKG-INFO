@@ -1,0 +1,590 @@
+Metadata-Version: 2.4
+Name: pdbstex
+Version: 0.1.0
+Summary: PDBStEx: RCSB PDB search, download, and structure splitting utility
+Author: Michele Massuoli
+License: MIT
+Requires-Python: >=3.11
+Description-Content-Type: text/markdown
+License-File: LICENSE
+Requires-Dist: requests>=2.31.0
+Requires-Dist: gemmi>=0.6.7
+Dynamic: license-file
+
+## PDBStEx
+
+CLI tool to search the PDB, download mmCIF coordinate files, and split structures into standardized receptor/ligand/cofactor/ion/water variants (AU + Biological Assembly 1), producing a reproducible on-disk dataset with manifest + per-entry metadata.
+
+PDBStEx is designed for batch processing and *never overwrites existing outputs*; all recoverable issues are logged as warnings, and processing continues whenever possible.
+
+---
+
+## Summary
+
+Given one or more **search terms** (e.g. receptor name, ligand name, keyword) and/or explicit **PDB IDs**, `pdbstex`:
+
+1. queries the **RCSB Search API v2** to obtain matching PDB entry IDs (optional),
+2. resolves **obsolete / replaced PDB IDs** automatically (warning emitted),
+3. fetches **entry metadata** (method, resolution, dates, etc.),
+4. downloads **mmCIF** coordinate files for:
+   - **Asymmetric Unit (AU)**: `<PDB>.cif.gz`
+   - **Biological Assembly 1 (BA1)**: `<PDB>-assembly1.cif.gz` (if available),
+5. saves raw mmCIF and converts to raw PDB (with an informational warning about possible information loss),
+6. splits each dataset (AU and BA1) into:
+   - receptor-only (polymer entities),
+   - receptor+cofactors (+ optional ions),
+   - receptor+cofactors+bridge waters (+ optional ions),
+   - chain-split versions of the same variants,
+   - per-instance ligand/cofactor/ion files (with conformations/altloc handling),
+7. writes:
+   - `manifest.json` at run root,
+   - `metadata.json` per entry (standard keys),
+   - `index.json` per dataset (AU and BA1).
+
+PDBStEx focuses on **deterministic filesystem layout**, **standardized metadata keys**, and **robust batch behavior** under partial failures and rate limiting.
+
+---
+
+## Features
+
+- **Search → Download → Split** pipeline in one command.
+- **AU + Biological Assembly 1** handled in the same run.
+- **Receptor/ligand separation**:
+  - receptor = all polymer entities (all chains),
+  - ligands/cofactors/ions = non-polymer entities (waters excluded).
+- **Altloc / conformations support** (`--altloc-mode`):
+  - `split`: generate one output per altloc letter found (recommended),
+  - `best`: pick altloc with highest summed occupancy,
+  - `first`: pick A (if present) else first seen,
+  - `keep`: keep all altlocs in one file.
+- **Bridge water detection** based on heavy-atom distance cutoff (default 3.5 Å):
+  - water kept if it connects ≥2 partners among:
+    - polymer↔polymer, polymer↔ligand, polymer↔cofactor, ligand↔cofactor, cofactor↔cofactor, etc.
+  - optional exclusion of waters bridging adjacent polymer residues in the same chain (default excludes).
+- **Cofactor strategy**:
+  - if `--ligand-id` is provided, *everything else non-polymer (excluding waters/ions) is treated as cofactor by exclusion*,
+  - otherwise: can use `--cofactor-id` and/or a small built-in cofactor list (warning emitted when inference may be incomplete).
+- **Rate-limit handling (HTTP 429)**:
+  - interactive warning with user choice:
+    - reduce max RPS and retry,
+    - retry unchanged,
+    - skip request,
+  - or non-interactive automatic backoff + reduction.
+- **No overwrite** policy:
+  - existing entry folder ⇒ entry is skipped with warning,
+  - existing manifest ⇒ not overwritten (warning).
+
+---
+
+## Requirements
+
+- Python ≥ 3.11
+- Dependencies (installed automatically via pip):
+  - `requests`
+  - `gemmi`
+
+---
+
+## Installation
+
+pip:
+
+    pip install pdbstex
+
+From source (editable):
+
+    pip install -e .
+
+---
+
+## Quick start
+
+### 1) Search by text term(s)
+
+Example (full-text search):
+
+    pdbstex "adenosine receptor"
+
+Multiple terms (they are combined into a single query string in the Search API request):
+
+    pdbstex "beta adrenergic receptor" "antagonist"
+
+### 2) Process explicit PDB IDs
+
+You can pass PDB IDs as positional terms:
+
+    pdbstex 4HHB 1CBS
+
+Or via `--pdb-id` (repeatable):
+
+    pdbstex --pdb-id 4HHB --pdb-id 1CBS
+
+### 3) Use a config file (recommended)
+
+    pdbstex --config settings.toml "adenosine receptor"
+
+CLI flags override config keys.
+
+---
+
+## CLI
+
+    pdbstex [terms...] [options]
+
+### Positional arguments
+
+- `terms` (optional list): search terms (full-text) and/or PDB IDs.
+  - If a term matches the PDB ID pattern (`4HHB`), it is treated as a PDB ID.
+  - Otherwise it is treated as a search term.
+
+At least one of:
+- positional `terms` (including PDB IDs), or
+- `--pdb-id`
+must be provided.
+
+### Options
+
+#### Input / selection
+
+- `--config PATH`
+  - config file in `.toml` or `.json`
+  - CLI overrides config
+- `--pdb-id ID` (repeatable)
+  - explicit entry IDs to process
+- `--max-entries N`
+  - cap the total number of entries processed (0 = no cap)
+- `--include-no-ligand`
+  - include entries even if they have no non-polymer entities (default excludes)
+
+#### Experimental filters
+
+- `--method METHOD` (repeatable)
+  - allowed experimental methods (default: `X-RAY DIFFRACTION`)
+- `--max-resolution FLOAT`
+  - maximum resolution (Å) (default: 2.5)
+- `--include-missing-resolution`
+  - keep entries even if resolution is missing
+
+#### Output control
+
+- `--out-dir DIR`
+  - output directory root (default: `PDBStEx_output`)
+- `--no-raw`
+  - do not save raw downloads and raw PDB conversion
+
+#### Splitting logic
+
+- `--ligand-id CCD` (repeatable)
+  - ligand chemical component ID(s) (CCD)
+  - if provided: cofactors are inferred by exclusion (everything else non-polymer except waters/ions)
+- `--cofactor-id CCD` (repeatable)
+  - explicitly declare cofactor CCD IDs
+- `--remove-ions`
+  - remove ions from generated structures
+- `--altloc-mode {split,keep,best,first}`
+  - altloc handling strategy (default: `split`)
+- `--keep-hydrogens`
+  - include H atoms (default excludes)
+
+#### Bridge waters
+
+- `--bridge-cutoff FLOAT`
+  - heavy-atom distance cutoff in Å (default: 3.5)
+- `--include-adjacent-polymer-bridge`
+  - keep waters bridging adjacent polymer residues (default excludes)
+
+#### Rate limiting
+
+- `--max-rps FLOAT`
+  - max requests per second (default: 2.0)
+- `--no-interactive-rate-limit`
+  - disable interactive prompt on HTTP 429 (still backs off automatically)
+
+---
+
+## Config files
+
+Config supports **TOML** and **JSON**.
+
+All keys (with defaults):
+
+- `out_dir` (str) = `"PDBStEx_output"`
+- `max_entries` (int) = `0`
+- `include_no_ligand` (bool) = `false`
+- `methods` (list[str]) = `["X-RAY DIFFRACTION"]`
+- `max_resolution` (float) = `2.5`
+- `include_missing_resolution` (bool) = `false`
+- `bridge_cutoff` (float) = `3.5`
+- `include_adjacent_polymer_bridge` (bool) = `false`
+- `remove_ions` (bool) = `false`
+- `altloc_mode` (str) = `"split"`
+- `keep_hydrogens` (bool) = `false`
+- `max_rps` (float) = `2.0`
+- `interactive_rate_limit` (bool) = `true`
+- `cofactor_ids` (list[str]) = `[]`
+- `ligand_ids` (list[str]) = `[]`
+- `save_raw_downloads` (bool) = `true`
+
+Example TOML:
+
+    out_dir = "PDBStEx_output"
+    max_entries = 50
+    include_no_ligand = false
+    methods = ["X-RAY DIFFRACTION"]
+    max_resolution = 2.2
+    include_missing_resolution = false
+    bridge_cutoff = 3.5
+    include_adjacent_polymer_bridge = false
+    remove_ions = false
+    altloc_mode = "split"
+    keep_hydrogens = false
+    max_rps = 1.0
+    interactive_rate_limit = true
+    ligand_ids = ["ATP", "ADP"]
+    cofactor_ids = ["MG", "ZN"]
+    save_raw_downloads = true
+
+Example JSON:
+
+    {
+      "out_dir": "PDBStEx_output",
+      "max_entries": 50,
+      "include_no_ligand": false,
+      "methods": ["X-RAY DIFFRACTION"],
+      "max_resolution": 2.2,
+      "include_missing_resolution": false,
+      "bridge_cutoff": 3.5,
+      "include_adjacent_polymer_bridge": false,
+      "remove_ions": false,
+      "altloc_mode": "split",
+      "keep_hydrogens": false,
+      "max_rps": 1.0,
+      "interactive_rate_limit": true,
+      "ligand_ids": ["ATP", "ADP"],
+      "cofactor_ids": ["MG", "ZN"],
+      "save_raw_downloads": true
+    }
+
+---
+
+## How PDBStEx queries RCSB
+
+PDBStEx uses these public endpoints:
+
+### Search API (find entry IDs)
+
+Base endpoint (GET/POST):
+
+    https://search.rcsb.org/rcsbsearch/v2/query
+
+PDBStEx sends a JSON query using full-text search and (optionally) filters for:
+- experimental method,
+- resolution threshold,
+- presence/absence of non-polymer entities.
+
+### Data API (entry metadata)
+
+Entry endpoint pattern:
+
+    https://data.rcsb.org/rest/v1/core/entry/<PDB_ID>
+
+Used to retrieve:
+- title/name,
+- deposition/release/revision dates,
+- experimental method(s),
+- resolution (if available),
+- counts of polymer/non-polymer entities,
+- keywords.
+
+### Holdings status (obsolete/replaced IDs)
+
+Batch endpoint:
+
+    https://data.rcsb.org/rest/v1/holdings/status?ids=4HHB,1CBS
+
+PDBStEx checks whether an ID is current or replaced; if replaced, it automatically uses the replacement ID and records a warning.
+
+### Coordinate file downloads
+
+PDBStEx downloads mmCIF from:
+
+    https://files.rcsb.org/download/<PDB_ID>.cif.gz
+    https://files.rcsb.org/download/<PDB_ID>-assembly1.cif.gz
+
+These files are decompressed locally and parsed via `gemmi`.
+
+---
+
+## Output layout
+
+Output root (default `PDBStEx_output/`) contains:
+
+- `manifest.json` (run-level summary)
+- one folder per entry:
+
+    PDBStEx_output/
+      manifest.json
+      4HHB/
+        raw/
+          asymmetric_unit.cif
+          asymmetric_unit.pdb
+          biological_assembly_1.cif
+          biological_assembly_1.pdb
+        asymmetric_unit/
+          receptor/
+            <files...>
+          chains/
+            <files...>
+          ligands/
+            <files...>
+          cofactors/
+            <files...>
+          ions/
+            <files...>
+          index.json
+        biological_assembly_1/
+          receptor/
+          chains/
+          ligands/
+          cofactors/
+          ions/
+          index.json
+        metadata.json
+
+### Naming conventions (high level)
+
+Receptor variants:
+
+- `<PDB>_<DATASET>_receptor_only_altX.(cif|pdb)`
+- `<PDB>_<DATASET>_receptor_plus_cofactors_altX.(cif|pdb)`
+- `<PDB>_<DATASET>_receptor_bridge_waters_altX.(cif|pdb)`
+
+Chain variants:
+
+- `<PDB>_<DATASET>_chain_<CHAIN>_altX_only.(cif|pdb)`
+- `<PDB>_<DATASET>_chain_<CHAIN>_altX_plus_cofactors.(cif|pdb)`
+- `<PDB>_<DATASET>_chain_<CHAIN>_altX_bridge_waters.(cif|pdb)`
+
+Ligands / cofactors / ions:
+
+- `ligand_<CHAIN>_<RESNUM>_<RESNAME>_altX.(cif|pdb)`
+- `cofactor_<CHAIN>_<RESNUM>_<RESNAME>_altX.(cif|pdb)`
+- `ion_<CHAIN>_<RESNUM>_<RESNAME>_altX.(cif|pdb)`
+
+Where `altX` is:
+- `altNONE` if no altloc was selected (or altloc_mode yields no letters),
+- `altA`, `altB`, ... when altloc is split/selected.
+
+---
+
+## metadata.json schema (per entry)
+
+`metadata.json` is meant to be stable and machine-readable. Keys are standardized.
+
+Top-level keys:
+
+- `schema_version` (string): `"pdbstex_metadata_v1"`
+- `Name` (string): entry title if available
+- `PDB_code` (string)
+- `deposit_date` (string, ISO date or empty)
+- `release_date` (string, ISO date or empty)
+- `revision_date` (string, ISO date or empty)
+- `experimental_method` (list[string])
+- `resolution_angstrom` (float or null)
+- `keywords` (string)
+- `polymer_entity_count` (int or null)
+- `nonpolymer_entity_count` (int or null)
+- `settings` (object): settings snapshot used for this run
+- `files` (object): all generated file paths + SHA256 (when file exists)
+- `warnings` (list[object]): structured warnings collected during processing
+
+`files` structure:
+
+- `asymmetric_unit`
+  - `receptor_variants`
+  - `chains`
+  - `ligands`
+  - `cofactors`
+  - `ions`
+- `biological_assembly_1`
+  - same keys as above
+
+Each file record includes:
+- relative path to CIF/PDB under output root,
+- `sha256_cif` / `sha256_pdb` (empty if file missing).
+
+---
+
+## index.json schema (per dataset)
+
+For each dataset directory (`asymmetric_unit/` and `biological_assembly_1/`), `index.json` provides a lightweight file index:
+
+- `schema_version`: `"pdbstex_dataset_index_v1"`
+- `files`:
+  - `receptor_variants`
+  - `chains`
+  - `ligands`
+  - `cofactors`
+  - `ions`
+
+(Unlike `metadata.json`, it does not store SHA256; it is meant as a quick navigator.)
+
+---
+
+## Bridge waters: definition and algorithm
+
+PDBStEx considers a water residue (HOH/WAT/H2O/DOD) a **bridge water** if:
+
+- it is within `bridge_cutoff` Å (default 3.5 Å) of **≥ 2 partners**, where partners are residues belonging to:
+  - polymer (receptor),
+  - ligand residues,
+  - cofactor residues.
+
+Only heavy atoms are considered by default (H excluded unless `--keep-hydrogens`).
+
+### Adjacent polymer exclusion (default)
+
+If a water bridges *only polymer residues* that are **adjacent in the same chain** (|seqnum difference| ≤ 1), it is excluded by default.
+
+Enable inclusion with:
+
+    --include-adjacent-polymer-bridge
+
+---
+
+## Ligands vs cofactors vs ions
+
+### Waters
+
+Always excluded from ligands/cofactors. Considered only for bridge-water logic.
+
+### Ions
+
+By default, ions are kept and exported into `ions/`, and also included in receptor variants that include cofactors/bridge waters.
+
+To remove ions everywhere:
+
+    --remove-ions
+
+### Ligands and cofactors
+
+Best practice: define ligand(s) explicitly with `--ligand-id`.
+
+- If `ligand_ids` is set:
+  - residues whose CCD IDs match are ligands,
+  - all other non-polymer residues (excluding waters and ions) are treated as cofactors (exclusion rule).
+
+- If `ligand_ids` is empty:
+  - if `cofactor_ids` is set: those are cofactors, everything else non-polymer becomes ligands,
+  - otherwise: PDBStEx uses a small built-in cofactor list and warns that classification may be incomplete.
+
+---
+
+## Altloc handling notes
+
+Altloc strategies affect how many files are generated:
+
+- `split` can multiply outputs significantly (receptor variants, chain variants, and per-residue ligands/cofactors/ions).
+- For receptor/chain variants, the altloc letter is applied globally: atoms with a non-empty altloc are kept only if they match the selected letter; atoms with blank altloc are kept.
+
+If you need exhaustive conformational enumeration, prefer `split`. If you need a single representative structure, prefer `best`.
+
+---
+
+## Obsolete/replaced PDB IDs
+
+If a PDB ID is obsolete and replaced, PDBStEx:
+- emits a warning with the original ID,
+- automatically processes the replacement ID (if provided by holdings status endpoint),
+- continues.
+
+If an ID cannot be resolved, PDBStEx emits a warning and marks the entry as failed/invalid in `manifest.json`.
+
+---
+
+## Rate limiting (HTTP 429)
+
+On HTTP 429:
+- PDBStEx emits a warning.
+- If running interactively in a TTY and `interactive_rate_limit=true`, you can choose:
+  - reduce max RPS and retry,
+  - retry unchanged,
+  - skip.
+
+If non-interactive (or prompts disabled), PDBStEx automatically:
+- reduces max RPS by half down to a minimum,
+- retries with exponential backoff,
+- and eventually skips that request if it keeps failing.
+
+---
+
+## manifest.json (run-level)
+
+`manifest.json` is written in the output root and contains:
+
+- input terms and PDB IDs,
+- settings snapshot,
+- run-level warnings,
+- one result record per processed entry:
+  - PDB_code,
+  - status (`ok`, `filtered`, `failed_download`, `skipped_exists`, etc.),
+  - output_dir,
+  - metadata_json path,
+  - warnings list.
+
+`manifest.json` is never overwritten; if it already exists, PDBStEx emits a warning.
+
+---
+
+## Troubleshooting
+
+### “No results” from search
+- Check spelling and try broader terms.
+- Try running without method/resolution filters (via config or CLI).
+
+### Entries filtered unexpectedly
+- Remember that `include_no_ligand=false` filters out entries that have *zero non-polymer entities* as reported by metadata.
+- Resolution can be missing for some entries; use `--include-missing-resolution` if needed.
+
+### Biological Assembly 1 missing
+- Not all entries provide BA1. PDBStEx warns and still processes AU.
+
+### Too many files / huge outputs
+- `altloc_mode=split` can generate many outputs.
+- Reduce scope with `--max-entries` or use `altloc_mode=best`.
+
+### Windows / terminal prompts
+- If interactive prompts are problematic, disable them:
+
+    --no-interactive-rate-limit
+
+---
+
+## Development
+
+Run from source:
+
+    pip install -e .
+    pdbstex --help
+
+Build package:
+
+    python -m pip install build
+    python -m build
+
+---
+
+## License
+
+Released under the MIT License.
+
+---
+
+## References
+
+RCSB APIs used by PDBStEx (documentation entry points):
+
+    https://search.rcsb.org/
+    https://data.rcsb.org/
+    https://www.rcsb.org/docs/programmatic-access/file-download-services
+    https://data.rcsb.org/migration-guide.html

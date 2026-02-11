@@ -1,0 +1,2 @@
+[console_scripts]
+pdbstex = pdbstex.cli:main
